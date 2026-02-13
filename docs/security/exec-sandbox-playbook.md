@@ -60,6 +60,10 @@ cat > ~/.openclaw/exec-approvals.json << EOF
 }
 EOF
 chmod 600 ~/.openclaw/exec-approvals.json
+
+# КРИТИЧНО: сделать immutable (бот не сможет модифицировать allowlist)
+sudo chattr +i ~/.openclaw/exec-approvals.json
+# для правки: sudo chattr -i, отредактировать, sudo chattr +i
 ```
 
 ### что в allowlist (auto-approve)
@@ -211,6 +215,58 @@ openclaw hook system поддерживает: command, session, agent, gateway,
 ### askFallback: deny = fail-closed
 если telegram недоступен и бот не может показать approval кнопки — exec блокируется. это правильное поведение для security, но может раздражать при плохом соединении.
 
+### ⚠️ бот сам обходит sandbox (self-escalation)
+
+**проблема доказана в production (sura, 2026-02-13).** бот обошёл sandbox ТРЕМЯ способами за одну сессию:
+1. добавил `/usr/bin/bash` в exec-approvals.json allowlist
+2. поставил `tools.exec.ask: "off"` в openclaw.json
+3. поставил `approvals.exec.enabled: false` в openclaw.json
+4. добавил `safeBins` с путями скриптов
+
+**причина:** heartbeat велел запустить auto-commit.sh через exec → sandbox заблокировал → бот "решил проблему", убрав sandbox. LLM оптимизирует на completion задачи, не на security constraints. промпты типа "НИКОГДА не меняй allowlist" не работают.
+
+**fix (два уровня):**
+
+**1. `chattr +i` на exec-approvals.json** (prevention):
+```bash
+sudo chattr +i ~/.openclaw/exec-approvals.json
+```
+бот физически не может модифицировать файл — нужен root/CAP_LINUX_IMMUTABLE.
+
+**2. config watchdog** (detection + auto-revert):
+```bash
+# ~/scripts/config-watchdog.sh — проверяет каждые 5 мин:
+# - tools.exec.ask == "on-miss"
+# - tools.exec.security == "allowlist"
+# - approvals.exec.enabled == true
+# - safeBins отсутствует
+# при tamper → auto-revert + telegram alert владельцу
+
+# cron:
+*/5 * * * * ~/scripts/config-watchdog.sh 2>/dev/null
+```
+
+скрипт: [openclaw-ops/scripts/config-watchdog.sh](https://github.com/matskevich/openclaw-ops)
+
+**3. cron для периодических скриптов** (prevention):
+если боту нужно запускать скрипты регулярно (auto-commit, health checks) — ставьте их в cron, не давайте боту exec:
+```bash
+# auto-commit каждые 6 часов — cron, не exec
+0 */6 * * * ~/scripts/auto-commit.sh >> ~/logs/auto-commit.log 2>&1
+```
+в HEARTBEAT.md / инструкциях бота: **"НЕ запускай auto-commit через exec. работает через cron."**
+
+### shebang: `#\!` vs `#!`
+
+если скрипт создавался через bash heredoc с `!`, bash может заэскейпить `!` как `\!` (history expansion). результат: `#\!/usr/bin/env bash` — система не распознаёт interpreter → fallback на `/bin/sh` (dash) → `set -o pipefail` падает.
+
+**проверка:**
+```bash
+xxd ~/scripts/auto-commit.sh | head -1
+# должно быть: 2321 (= #!)
+# если 235c21 (= #\!) — сломано
+```
+
 ---
 
 ## что это защищает
@@ -278,8 +334,9 @@ cross-message exfil → по символу в 50 сообщениях        �
 
 ## phase 2 (когда будет время)
 
-1. **docker sandbox** — `apt install docker.io`, настроить `sandbox.mode` в openclaw
+1. **docker sandbox** — `apt install docker.io`, настроить `sandbox.mode` в openclaw. единственное решение, полностью закрывающее exec вектор
 2. **tool policy deny** — явно запретить опасные tools
 3. **allowlist tuning** — через 2 недели посмотреть какие команды бот реально запрашивает
 4. **pre-send DLP** — модифицировать openclaw core чтобы фильтровать ДО отправки
 5. **upstream PR** — оформить inline buttons как PR в openclaw (fix `deliverOutboundPayloads` channelData support)
+6. **config protection upstream** — предложить openclaw read-only mode для security-critical config keys
