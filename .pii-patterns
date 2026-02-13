@@ -1,0 +1,35 @@
+# PII patterns for openclaw-infra (public repo)
+# One regex per line. Lines starting with # are comments.
+# Used by scripts/pre-commit-secrets-check.sh
+#
+# HOW TO USE:
+# 1. Add patterns for YOUR real data below
+# 2. Run: cp scripts/pre-commit-secrets-check.sh .git/hooks/pre-commit
+# 3. chmod +x .git/hooks/pre-commit
+# 4. git commit will now block matching content
+#
+# EXAMPLES (uncomment and customize):
+
+# ── Telegram IDs (your bot, your account, friends) ──
+# 7997448414
+# 8566320139
+# 6101763
+
+# ── Telegram usernames ──
+# @your_bot_username
+# @your_personal_username
+
+# ── Server IPs ──
+# 89\.167\.\d+\.\d+
+# 46\.225\.125\.53
+
+# ── Real names in code examples ──
+# YourFirstName
+# YourLastName
+
+# ── Internal repo/project names ──
+# sura-brain
+# openclaw-ops
+
+# ── Old paths (if migrated) ──
+# \.clawdbot/

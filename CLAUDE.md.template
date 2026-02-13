@@ -1,0 +1,128 @@
+# CLAUDE.md — контекст для Claude Code
+
+**После setup:** переименуй этот файл в `CLAUDE.md` и заполни плейсхолдеры.
+
+## Что это
+
+Personal AI assistant (Moltbot) на VPS.
+Общение через Telegram, память persistent, skills extensible.
+
+---
+
+## КРИТИЧЕСКИЕ ПРАВИЛА
+
+Эти правила выучены на реальных ошибках. См. `docs/learnings.md` для деталей.
+
+### 1. НЕ УГАДЫВАТЬ CONFIG VALUES!
+
+**4 раза ломали бота угадыванием полей конфига:**
+- Config overwrite → потеряли auth token
+- Opus allowlist → crash
+- contextPruning.mode → crash
+
+**Перед изменением конфига:**
+1. Найти ТОЧНЫЙ пример в https://docs.openclaw.ai
+2. Или найти пример в существующем рабочем конфиге
+3. Или спросить пользователя
+
+### 2. КОНФИГ НЕ ДЕПЛОИТЬ
+
+Конфиг (`~/.openclaw/openclaw.json`) редактируется ТОЛЬКО на сервере:
+```bash
+ssh SERVER_USER@SERVER_IP
+nano ~/.openclaw/openclaw.json
+systemctl --user restart moltbot
+```
+
+**НЕ деплоить через rsync/sync.sh!** Потеряем auth token и другие настройки.
+
+### 3. BACKUP ПЕРЕД ИЗМЕНЕНИЯМИ КОНФИГА
+
+```bash
+ssh SERVER_USER@SERVER_IP 'cp ~/.openclaw/openclaw.json ~/.openclaw/openclaw.json.bak.$(date +%Y%m%d_%H%M%S)'
+```
+
+### 4. API КЛЮЧИ — БЕЗОПАСНОСТЬ
+
+- **НИКОГДА не коммитить .env** — там API ключи
+- **При утечке ключа** — немедленно отозвать и создать новый
+- **Ограничивать ключи** — IP restrictions, rate limits где возможно
+
+---
+
+## Два репозитория
+
+### my-moltbot (этот репо)
+- **Что:** инфраструктура, docs, scripts, prompts (AGENTS.md, SECURITY.md)
+- **Ownership:** МЫ (владелец)
+
+### my-moltbot-memory (на сервере ~/clawd/)
+- **Что:** работа бота — SOUL.md, skills/, custom/, memory/
+- **Ownership:** БОТ (он сам туда пишет)
+- **Auto-commit:** каждые 6 часов
+
+**Подробнее:** `docs/sync-workflow.md`
+
+---
+
+## Структура
+
+```
+prompts/AGENTS.md     # Системные инструкции боту (мы пишем)
+prompts/SECURITY.md   # Политики безопасности (мы пишем)
+prompts/SOUL.md       # Личность бота (КОПИЯ с сервера, бот владеет)
+prompts/USER.md       # Заметки о владельце (КОПИЯ с сервера, бот владеет)
+scripts/safe-push.sh  # Главный скрипт деплоя
+scripts/sync.sh       # Низкоуровневый sync (не использовать напрямую)
+docs/                 # Документация, decisions, learnings
+```
+
+---
+
+## Сервер
+
+**ЗАПОЛНИ после setup:**
+
+- **IP:** `__SERVER_IP__`
+- **User:** `__SERVER_USER__` (обычно `moltbot`)
+- **Конфиг:** `~/.openclaw/openclaw.json`
+- **Workspace:** `~/clawd/`
+
+---
+
+## Команды
+
+```bash
+# Деплой (ВСЕГДА через safe-push!)
+./scripts/safe-push.sh
+
+# SSH на сервер
+ssh __SERVER_USER__@__SERVER_IP__
+
+# Логи
+ssh __SERVER_USER__@__SERVER_IP__ "journalctl --user -u moltbot -f"
+
+# Рестарт
+ssh __SERVER_USER__@__SERVER_IP__ "systemctl --user restart moltbot"
+
+# Статус
+ssh __SERVER_USER__@__SERVER_IP__ "systemctl --user status moltbot"
+```
+
+---
+
+## Документация
+
+- **Decisions:** `docs/decisions.md`
+- **Learnings:** `docs/learnings.md` ← ОШИБКИ И ВЫВОДЫ, ЧИТАЙ!
+- **Sync workflow:** `docs/sync-workflow.md`
+- **Moltbot docs:** https://docs.openclaw.ai
+
+---
+
+## Чеклист после setup
+
+- [ ] Заменил `__SERVER_IP__` на реальный IP
+- [ ] Заменил `__SERVER_USER__` на реального пользователя
+- [ ] Переименовал этот файл в `CLAUDE.md`
+- [ ] Прочитал `docs/learnings.md`

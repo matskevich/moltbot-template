@@ -1,0 +1,359 @@
+diff --git a/src/auto-reply/dispatch.ts b/src/auto-reply/dispatch.ts
+index d018623c7..535de7bfb 100644
+--- a/src/auto-reply/dispatch.ts
++++ b/src/auto-reply/dispatch.ts
+@@ -2,6 +2,7 @@ import type { OpenClawConfig } from "../config/config.js";
+ import type { DispatchFromConfigResult } from "./reply/dispatch-from-config.js";
+ import type { FinalizedMsgContext, MsgContext } from "./templating.js";
+ import type { GetReplyOptions } from "./types.js";
++import { triggerMessageReceived } from "../hooks/message-hooks.js";
+ import { dispatchReplyFromConfig } from "./reply/dispatch-from-config.js";
+ import { finalizeInboundContext } from "./reply/inbound-context.js";
+ import {
+@@ -22,6 +23,7 @@ export async function dispatchInboundMessage(params: {
+   replyResolver?: typeof import("./reply.js").getReplyFromConfig;
+ }): Promise<DispatchInboundResult> {
+   const finalized = finalizeInboundContext(params.ctx);
++  await triggerMessageReceived(finalized.SessionKey ?? "", finalized);
+   return await dispatchReplyFromConfig({
+     ctx: finalized,
+     cfg: params.cfg,
+diff --git a/src/auto-reply/reply/reply-dispatcher.ts b/src/auto-reply/reply/reply-dispatcher.ts
+index be505a8bc..74f4ccb0b 100644
+--- a/src/auto-reply/reply/reply-dispatcher.ts
++++ b/src/auto-reply/reply/reply-dispatcher.ts
+@@ -1,7 +1,7 @@
+ import type { HumanDelayConfig } from "../../config/types.js";
+ import type { GetReplyOptions, ReplyPayload } from "../types.js";
+ import type { ResponsePrefixContext } from "./response-prefix-template.js";
+-import type { TypingController } from "./typing.js";
++import { triggerMessageSent } from "../../hooks/message-hooks.js";
+ import { sleep } from "../../utils.js";
+ import { normalizeReplyPayload, type NormalizeReplySkipReason } from "./normalize-reply.js";
+ 
+@@ -53,6 +53,12 @@ export type ReplyDispatcherOptions = {
+   onSkip?: ReplyDispatchSkipHandler;
+   /** Human-like delay between block replies for natural rhythm. */
+   humanDelay?: HumanDelayConfig;
++  /** Hook context for message:sent events */
++  hookContext?: {
++    sessionKey?: string;
++    channel?: string;
++    target?: string;
++  };
+ };
+ 
+ export type ReplyDispatcherWithTypingOptions = Omit<ReplyDispatcherOptions, "onIdle"> & {
+@@ -139,6 +145,15 @@ export function createReplyDispatcher(options: ReplyDispatcherOptions): ReplyDis
+           }
+         }
+         await options.deliver(normalized, { kind });
++        if (options.hookContext?.sessionKey) {
++          triggerMessageSent(options.hookContext.sessionKey, normalized, {
++            target: options.hookContext.target,
++            channel: options.hookContext.channel,
++            kind,
++          }).catch((err) => {
++            console.error("[message:sent hook] Error:", err instanceof Error ? err.message : String(err));
++          });
++        }
+       })
+       .catch((err) => {
+         options.onError?.(err, { kind });
+diff --git a/src/discord/monitor/message-handler.process.ts b/src/discord/monitor/message-handler.process.ts
+index 927e9621a..0a90b9875 100644
+--- a/src/discord/monitor/message-handler.process.ts
++++ b/src/discord/monitor/message-handler.process.ts
+@@ -351,6 +351,11 @@ export async function processDiscordMessage(ctx: DiscordMessagePreflightContext)
+ 
+   const { dispatcher, replyOptions, markDispatchIdle } = createReplyDispatcherWithTyping({
+     ...prefixOptions,
++    hookContext: {
++      sessionKey: ctxPayload.SessionKey ?? route.sessionKey,
++      channel: "discord",
++      target: deliverTarget,
++    },
+     humanDelay: resolveHumanDelayConfig(cfg, route.agentId),
+     deliver: async (payload: ReplyPayload) => {
+       const replyToId = replyReference.use();
+diff --git a/src/hooks/hooks.ts b/src/hooks/hooks.ts
+index 3cf7a0958..a34d955ae 100644
+--- a/src/hooks/hooks.ts
++++ b/src/hooks/hooks.ts
+@@ -1,4 +1,5 @@
+ export * from "./internal-hooks.js";
++export * from "./message-hooks.js";
+ 
+ export type HookEventType = import("./internal-hooks.js").InternalHookEventType;
+ export type HookEvent = import("./internal-hooks.js").InternalHookEvent;
+diff --git a/src/hooks/internal-hooks.ts b/src/hooks/internal-hooks.ts
+index e92b19366..f1f87dae5 100644
+--- a/src/hooks/internal-hooks.ts
++++ b/src/hooks/internal-hooks.ts
+@@ -8,7 +8,7 @@
+ import type { WorkspaceBootstrapFile } from "../agents/workspace.js";
+ import type { OpenClawConfig } from "../config/config.js";
+ 
+-export type InternalHookEventType = "command" | "session" | "agent" | "gateway";
++export type InternalHookEventType = "command" | "session" | "agent" | "gateway" | "message";
+ 
+ export type AgentBootstrapHookContext = {
+   workspaceDir: string;
+diff --git a/src/hooks/loader.ts b/src/hooks/loader.ts
+index 2b7bc5395..eb381f193 100644
+--- a/src/hooks/loader.ts
++++ b/src/hooks/loader.ts
+@@ -38,7 +38,7 @@ export async function loadInternalHooks(
+   workspaceDir: string,
+ ): Promise<number> {
+   // Check if hooks are enabled
+-  if (!cfg.hooks?.internal?.enabled) {
++  if (false && !cfg.hooks?.internal?.enabled) { // TEMP: disabled check
+     return 0;
+   }
+ 
+diff --git a/src/hooks/message-hooks.ts b/src/hooks/message-hooks.ts
+new file mode 100644
+index 000000000..f0933908a
+--- /dev/null
++++ b/src/hooks/message-hooks.ts
+@@ -0,0 +1,84 @@
++/**
++ * Message hook events for message:received and message:sent
++ */
++
++import type { FinalizedMsgContext } from "../auto-reply/templating.js";
++import type { ReplyPayload } from "../auto-reply/types.js";
++import { createInternalHookEvent, triggerInternalHook } from "./internal-hooks.js";
++
++export type MessageReceivedContext = {
++  message: string;
++  rawBody?: string;
++  senderId?: string;
++  senderName?: string;
++  channel?: string;
++  messageId?: string;
++  isGroup?: boolean;
++  groupId?: string;
++  timestamp?: number;
++  commandAuthorized?: boolean;
++};
++
++export type MessageSentContext = {
++  text?: string;
++  mediaUrl?: string;
++  target?: string;
++  channel?: string;
++  kind?: string;
++};
++
++export async function triggerMessageReceived(
++  sessionKey: string,
++  ctx: FinalizedMsgContext,
++): Promise<void> {
++  if (!sessionKey) {
++    return;
++  }
++  const hookEvent = createInternalHookEvent("message", "received", sessionKey, {
++    message: ctx.Body ?? "",
++    rawBody: ctx.RawBody,
++    senderId: ctx.SenderId,
++    senderName: ctx.SenderName,
++    channel: ctx.Provider,
++    messageId: ctx.MessageSid,
++    isGroup: ctx.ChatType === "group",
++    groupId: ctx.ChatType === "group" ? ctx.From : undefined,
++    timestamp: ctx.Timestamp,
++    commandAuthorized: ctx.CommandAuthorized,
++  } satisfies MessageReceivedContext);
++
++  try {
++    await triggerInternalHook(hookEvent);
++  } catch (err) {
++    console.error(
++      "[message:received hook] Error:",
++      err instanceof Error ? err.message : String(err),
++    );
++  }
++}
++
++export async function triggerMessageSent(
++  sessionKey: string,
++  payload: ReplyPayload,
++  context: { target?: string; channel?: string; kind?: string },
++): Promise<void> {
++  if (!sessionKey) {
++    return;
++  }
++  const hookEvent = createInternalHookEvent("message", "sent", sessionKey, {
++    text: payload.text,
++    mediaUrl: payload.mediaUrl,
++    target: context.target,
++    channel: context.channel,
++    kind: context.kind,
++  } satisfies MessageSentContext);
++
++  try {
++    await triggerInternalHook(hookEvent);
++  } catch (err) {
++    console.error(
++      "[message:sent hook] Error:",
++      err instanceof Error ? err.message : String(err),
++    );
++  }
++}
+diff --git a/src/imessage/monitor/monitor-provider.ts b/src/imessage/monitor/monitor-provider.ts
+index a25b4644e..08492f834 100644
+--- a/src/imessage/monitor/monitor-provider.ts
++++ b/src/imessage/monitor/monitor-provider.ts
+@@ -619,6 +619,11 @@ export async function monitorIMessageProvider(opts: MonitorIMessageOpts = {}): P
+ 
+     const dispatcher = createReplyDispatcher({
+       ...prefixOptions,
++      hookContext: {
++        sessionKey: ctxPayload.SessionKey ?? route.sessionKey,
++        channel: "imessage",
++        target: ctxPayload.To,
++      },
+       humanDelay: resolveHumanDelayConfig(cfg, route.agentId),
+       deliver: async (payload) => {
+         await deliverReplies({
+diff --git a/src/signal/monitor/event-handler.ts b/src/signal/monitor/event-handler.ts
+index d60658d33..20807f41b 100644
+--- a/src/signal/monitor/event-handler.ts
++++ b/src/signal/monitor/event-handler.ts
+@@ -218,6 +218,11 @@ export function createSignalEventHandler(deps: SignalEventHandlerDeps) {
+         deps.runtime.error?.(danger(`signal ${info.kind} reply failed: ${String(err)}`));
+       },
+       onReplyStart: typingCallbacks.onReplyStart,
++      hookContext: {
++        sessionKey: route.sessionKey,
++        channel: "signal",
++        target: ctxPayload.To,
++      },
+     });
+ 
+     const { queuedFinal } = await dispatchInboundMessage({
+diff --git a/src/telegram/bot-message-dispatch.ts b/src/telegram/bot-message-dispatch.ts
+index 7af14e86e..9f0d9f88d 100644
+--- a/src/telegram/bot-message-dispatch.ts
++++ b/src/telegram/bot-message-dispatch.ts
+@@ -21,6 +21,7 @@ import { createReplyPrefixOptions } from "../channels/reply-prefix.js";
+ import { createTypingCallbacks } from "../channels/typing.js";
+ import { resolveMarkdownTableMode } from "../config/markdown-tables.js";
+ import { danger, logVerbose } from "../globals.js";
++import { triggerMessageReceived } from "../hooks/message-hooks.js";
+ import { deliverReplies } from "./bot/delivery.js";
+ import { resolveTelegramDraftStreamingChunking } from "./draft-chunking.js";
+ import { createTelegramDraftStream } from "./draft-stream.js";
+@@ -251,11 +252,20 @@ export const dispatchTelegramMessage = async ({
+     skippedNonSilent: 0,
+   };
+ 
++
++  // Trigger message:received hook before dispatch
++  await triggerMessageReceived(ctxPayload.SessionKey ?? route.sessionKey, ctxPayload);
++
+   const { queuedFinal } = await dispatchReplyWithBufferedBlockDispatcher({
+     ctx: ctxPayload,
+     cfg,
+     dispatcherOptions: {
+       ...prefixOptions,
++      hookContext: {
++        sessionKey: ctxPayload.SessionKey ?? route.sessionKey,
++        channel: "telegram",
++        target: String(chatId),
++      },
+       deliver: async (payload, info) => {
+         if (info.kind === "final") {
+           await flushDraft();
+diff --git a/src/hooks/message-hooks.ts b/src/hooks/message-hooks.ts
+new file mode 100644
+index 000000000..f0933908a
+--- /dev/null
++++ b/src/hooks/message-hooks.ts
+@@ -0,0 +1,84 @@
++/**
++ * Message hook events for message:received and message:sent
++ */
++
++import type { FinalizedMsgContext } from "../auto-reply/templating.js";
++import type { ReplyPayload } from "../auto-reply/types.js";
++import { createInternalHookEvent, triggerInternalHook } from "./internal-hooks.js";
++
++export type MessageReceivedContext = {
++  message: string;
++  rawBody?: string;
++  senderId?: string;
++  senderName?: string;
++  channel?: string;
++  messageId?: string;
++  isGroup?: boolean;
++  groupId?: string;
++  timestamp?: number;
++  commandAuthorized?: boolean;
++};
++
++export type MessageSentContext = {
++  text?: string;
++  mediaUrl?: string;
++  target?: string;
++  channel?: string;
++  kind?: string;
++};
++
++export async function triggerMessageReceived(
++  sessionKey: string,
++  ctx: FinalizedMsgContext,
++): Promise<void> {
++  if (!sessionKey) {
++    return;
++  }
++  const hookEvent = createInternalHookEvent("message", "received", sessionKey, {
++    message: ctx.Body ?? "",
++    rawBody: ctx.RawBody,
++    senderId: ctx.SenderId,
++    senderName: ctx.SenderName,
++    channel: ctx.Provider,
++    messageId: ctx.MessageSid,
++    isGroup: ctx.ChatType === "group",
++    groupId: ctx.ChatType === "group" ? ctx.From : undefined,
++    timestamp: ctx.Timestamp,
++    commandAuthorized: ctx.CommandAuthorized,
++  } satisfies MessageReceivedContext);
++
++  try {
++    await triggerInternalHook(hookEvent);
++  } catch (err) {
++    console.error(
++      "[message:received hook] Error:",
++      err instanceof Error ? err.message : String(err),
++    );
++  }
++}
++
++export async function triggerMessageSent(
++  sessionKey: string,
++  payload: ReplyPayload,
++  context: { target?: string; channel?: string; kind?: string },
++): Promise<void> {
++  if (!sessionKey) {
++    return;
++  }
++  const hookEvent = createInternalHookEvent("message", "sent", sessionKey, {
++    text: payload.text,
++    mediaUrl: payload.mediaUrl,
++    target: context.target,
++    channel: context.channel,
++    kind: context.kind,
++  } satisfies MessageSentContext);
++
++  try {
++    await triggerInternalHook(hookEvent);
++  } catch (err) {
++    console.error(
++      "[message:sent hook] Error:",
++      err instanceof Error ? err.message : String(err),
++    );
++  }
++}

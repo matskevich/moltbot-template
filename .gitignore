@@ -1,0 +1,19 @@
+# Secrets
+.env
+
+# Backups (local only)
+backups/
+
+# Bot's data (pulled from server)
+data/
+prompts/SOUL.md
+prompts/USER.md
+skills-server/
+custom/
+meta/
+config/openclaw-server.json
+
+# Temp
+*.log
+*.tmp
+.DS_Store

@@ -1,0 +1,10 @@
+{
+  "hooks": [
+    {
+      "name": "memory-logger",
+      "path": "hooks/memory-logger",
+      "events": ["message:received", "message:sent"],
+      "enabled": true
+    }
+  ]
+}
