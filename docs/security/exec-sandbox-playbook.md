@@ -161,6 +161,16 @@ python3 -c "import json; c=json.load(open('$HOME/.openclaw/openclaw.json')); pri
 
 ## gotchas
 
+### `agents.main` пустой allowlist при рестарте
+`ensureExecApprovals()` при старте добавляет `"main": { "allowlist": [] }` если агент зовётся "main" (дефолт). это перезатирает wildcard `*`. **fix:** дублировать allowlist и в `*`, и в `main`:
+
+```json
+"agents": {
+  "*": { "allowlist": [...] },
+  "main": { "allowlist": [...] }
+}
+```
+
 ### `cd ~/clawd && git status` → blocked
 `cd` = shell builtin, нет бинарника в /usr/bin → парсер не может resolve path → allowlist miss → approval required. бот должен использовать cwd параметр exec tool вместо cd. это UX friction, не security проблема.
 
@@ -197,9 +207,51 @@ cross-message exfil → по символу в 50 сообщениях        �
 
 ---
 
+## one-click approval buttons (telegram)
+
+по умолчанию approval = текст с UUID + `/approve <id> allow-once`. неудобно на мобильном.
+
+### настройка: approval → owner DM с кнопками
+
+добавить в `~/.openclaw/openclaw.json`:
+
+```json
+{
+  "approvals": {
+    "exec": {
+      "enabled": true,
+      "mode": "targets",
+      "targets": [
+        { "channel": "telegram", "to": "YOUR_TELEGRAM_ID" }
+      ]
+    }
+  }
+}
+```
+
+- `mode: "targets"` — approval ТОЛЬКО в DM владельца (не в группу где был запрос)
+- `to` — ваш numeric telegram ID (узнать: пошлите /id в @userinfobot)
+
+### патч: inline buttons
+
+**status:** требуется патч openclaw core. два файла:
+
+1. `src/infra/exec-approval-forwarder.ts` — кнопки Allow Once / Always / Deny + direct `sendMessageTelegram()` (workaround: `deliverOutboundPayloads` не поддерживает channelData для telegram)
+2. `src/telegram/bot-handlers.ts` — callback handler для `exec_approve:` callbacks, owner-only check, resolve через gateway
+
+патчи: [openclaw-ops/archive/patches/exec-approval-buttons/](https://github.com/matskevich/openclaw-ops/tree/main/archive/patches/exec-approval-buttons)
+
+**security:**
+- только owner (из `allowFrom`) может нажать кнопки
+- approval идёт в личку, не в группу (нет social engineering вектора)
+- callback_data: `exec_approve:<uuid>:<decision>` (62 chars, fits telegram 64-byte limit)
+
+---
+
 ## phase 2 (когда будет время)
 
 1. **docker sandbox** — `apt install docker.io`, настроить `sandbox.mode` в openclaw
 2. **tool policy deny** — явно запретить опасные tools
 3. **allowlist tuning** — через 2 недели посмотреть какие команды бот реально запрашивает
 4. **pre-send DLP** — модифицировать openclaw core чтобы фильтровать ДО отправки
+5. **upstream PR** — оформить inline buttons как PR в openclaw (fix `deliverOutboundPayloads` channelData support)
