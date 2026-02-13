@@ -29,17 +29,8 @@ ssh yourserver 'cp ~/.openclaw/openclaw.json ~/.openclaw/openclaw.json.bak.$(dat
 ## шаг 2: exec-approvals.json
 
 ```bash
-cat > ~/.openclaw/exec-approvals.json << 'EOF'
-{
-  "version": 1,
-  "defaults": {
-    "security": "allowlist",
-    "ask": "on-miss",
-    "askFallback": "deny"
-  },
-  "agents": {
-    "*": {
-      "allowlist": [
+# ВАЖНО: allowlist дублируется в * и main (см. gotchas ниже)
+ALLOWLIST='[
         { "pattern": "/usr/bin/git" },
         { "pattern": "/usr/bin/ls" },
         { "pattern": "/usr/bin/mkdir" },
@@ -52,8 +43,19 @@ cat > ~/.openclaw/exec-approvals.json << 'EOF'
         { "pattern": "/usr/bin/stat" },
         { "pattern": "/usr/bin/unzip" },
         { "pattern": "/usr/bin/jq" }
-      ]
-    }
+      ]'
+
+cat > ~/.openclaw/exec-approvals.json << EOF
+{
+  "version": 1,
+  "defaults": {
+    "security": "allowlist",
+    "ask": "on-miss",
+    "askFallback": "deny"
+  },
+  "agents": {
+    "*": { "allowlist": $ALLOWLIST },
+    "main": { "allowlist": $ALLOWLIST }
   }
 }
 EOF
@@ -113,6 +115,32 @@ PYEOF
 ```
 
 **ВАЖНО:** `host: "gateway"` — без этого exec может идти через sandbox path (который без docker = noop).
+
+## шаг 3.5: approval buttons (опционально, требует патч)
+
+если хотите one-click кнопки вместо `/approve <id>`:
+
+```bash
+python3 << 'PYEOF'
+import json
+with open("/home/YOUR_USER/.openclaw/openclaw.json") as f:
+    cfg = json.load(f)
+if "approvals" not in cfg:
+    cfg["approvals"] = {}
+cfg["approvals"]["exec"] = {
+    "enabled": True,
+    "mode": "targets",
+    "targets": [{"channel": "telegram", "to": "YOUR_TELEGRAM_ID"}]
+}
+with open("/home/YOUR_USER/.openclaw/openclaw.json", "w") as f:
+    json.dump(cfg, f, indent=2, ensure_ascii=False)
+print("approvals configured")
+PYEOF
+```
+
+**YOUR_TELEGRAM_ID** — ваш numeric ID (узнать: `/id` в @userinfobot).
+
+**требует патч openclaw core** — без него кнопки не работают. патчи: [openclaw-ops/archive/patches/exec-approval-buttons/](https://github.com/matskevich/openclaw-ops/tree/main/archive/patches/exec-approval-buttons). применять к форку openclaw, пересобрать.
 
 ## шаг 4: рестарт
 
