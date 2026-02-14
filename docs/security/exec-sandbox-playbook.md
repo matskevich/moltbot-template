@@ -287,7 +287,7 @@ grep in DEFAULT_SAFE_BINS → grep pattern .env            → NOT BLOCKED (open
 cross-message exfil → по символу в 50 сообщениях        → NOT BLOCKED (need rate limiting)
 ```
 
-для полной изоляции нужен docker sandbox (phase 2): spawned commands в контейнере без секретов в env.
+для полной изоляции — docker sandbox (phase 2): spawned commands в контейнере без секретов в env. **TESTED 260214: работает, 0 секретов в контейнере.**
 
 ---
 
@@ -332,11 +332,82 @@ cross-message exfil → по символу в 50 сообщениях        �
 
 ---
 
-## phase 2 (когда будет время)
+## phase 2: docker sandbox
 
-1. **docker sandbox** — `apt install docker.io`, настроить `sandbox.mode` в openclaw. единственное решение, полностью закрывающее exec вектор
+**status:** TESTED 260214, docker installed and working. mode `"non-main"` recommended.
+
+### "all" vs "non-main" — ВАЖНО
+
+- `"all"` — ВСЕ агенты в docker. **ЛОМАЕТ workspace:** CWD переезжает в `~/.openclaw/sandboxes/`, memory_search, heartbeat, skills по относительным путям — всё падает.
+- `"non-main"` — main agent на host (workspace ~/clawd/), child agents в docker. **РЕКОМЕНДУЕТСЯ.** main agent защищён allowlist + approval buttons.
+
+### установка
+
+```bash
+# 1. install docker
+sudo apt install docker.io
+sudo usermod -aG docker YOUR_USER
+
+# 2. ВАЖНО: перезапустить user systemd manager (иначе running services не подхватят группу)
+sudo systemctl restart user@$(id -u YOUR_USER)
+
+# 3. config — используйте "non-main", НЕ "all"
+python3 << 'PYEOF'
+import json
+with open("/home/YOUR_USER/.openclaw/openclaw.json") as f:
+    cfg = json.load(f)
+cfg.setdefault("agents", {}).setdefault("defaults", {}).setdefault("sandbox", {})["mode"] = "non-main"
+with open("/home/YOUR_USER/.openclaw/openclaw.json", "w") as f:
+    json.dump(cfg, f, indent=2, ensure_ascii=False)
+print("sandbox.mode: non-main")
+PYEOF
+
+# 4. restart bot
+systemctl --user restart YOUR_BOT_SERVICE
+
+# 5. verify container running
+docker ps  # should show openclaw-sbx-agent-main-*
+```
+
+### что проверить после включения
+
+```bash
+# env в контейнере — должно быть 4 переменных, 0 секретов
+docker exec $(docker ps -q) env
+
+# .env — должен быть "No such file or directory"
+docker exec $(docker ps -q) cat ~/.openclaw/.env
+
+# config — должен быть "No such file or directory"
+docker exec $(docker ps -q) cat ~/.openclaw/openclaw.json
+```
+
+### gotchas
+
+- **`usermod -aG docker` не подхватывается running services** → нужен `systemctl restart user@UID`
+- **НЕ используйте `"all"`** — ломает workspace, memory_search, heartbeat. используйте `"non-main"`
+- **RAM:** docker daemon ~200MB + ~50-100MB per-exec (short-lived). проверяйте `free -h`
+- **если docker down** → exec deny для child agents (fail-closed). main agent продолжает работать
+
+### rollback
+
+```bash
+python3 -c "
+import json
+with open('/home/YOUR_USER/.openclaw/openclaw.json') as f:
+    cfg = json.load(f)
+cfg['agents']['defaults']['sandbox'].pop('mode', None)
+with open('/home/YOUR_USER/.openclaw/openclaw.json', 'w') as f:
+    json.dump(cfg, f, indent=2, ensure_ascii=False)
+"
+systemctl --user restart YOUR_BOT_SERVICE
+```
+
+## phase 3 (backlog)
+
+1. **policy/cache split** — `exec-approvals.json` = immutable (chattr +i), cache = runtime. upstream PR
 2. **tool policy deny** — явно запретить опасные tools
 3. **allowlist tuning** — через 2 недели посмотреть какие команды бот реально запрашивает
 4. **pre-send DLP** — модифицировать openclaw core чтобы фильтровать ДО отправки
-5. **upstream PR** — оформить inline buttons как PR в openclaw (fix `deliverOutboundPayloads` channelData support)
-6. **config protection upstream** — предложить openclaw read-only mode для security-critical config keys
+5. **upstream PR** — inline buttons (fix `deliverOutboundPayloads` channelData support)
+6. **config protection upstream** — read-only mode для security-critical config keys
